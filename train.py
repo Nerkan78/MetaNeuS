@@ -7,9 +7,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from datasets.shapenet import build_shapenet
 from models.rendering import build_neus
+from torch.utils.tensorboard import SummaryWriter
 
 
-def inner_loop(conf, model, optim, imgs, masks, rays_o, rays_d):
+def inner_loop(conf, model, optim, imgs, masks, rays_o, rays_d, writer):
     """
     Train the inner model for a specified number of iteration
     """
@@ -38,6 +39,8 @@ def inner_loop(conf, model, optim, imgs, masks, rays_o, rays_d):
         loss = color_loss + conf["igr_weight"] * eikonal_loss + conf["mask_weight"] * mask_loss
         loss.backward()
         optim.step()
+        writer.add_scalar('loss', loss.item())
+        writer.add_scalar('psnr', color_loss.item())
 
 
 def report_result(conf, model, imgs, masks, rays_o, rays_d):
@@ -64,7 +67,7 @@ def report_result(conf, model, imgs, masks, rays_o, rays_d):
     return psnr
 
 
-def val_meta(conf, model, val_loader, device):
+def val_meta(conf, model, val_loader, device, writer):
     """
     Validate the meta trained model for few-shot view synthesis
     """
@@ -84,7 +87,7 @@ def val_meta(conf, model, val_loader, device):
         val_model.load_state_dict(meta_trained_state)
         val_optim = torch.optim.Adam(val_model.parameters(), conf["tto_lr"])
 
-        inner_loop(conf, val_model, val_optim, tto_imgs, tto_masks, tto_origs, tto_dirs)
+        inner_loop(conf, val_model, val_optim, tto_imgs, tto_masks, tto_origs, tto_dirs, writer)
         
         object_psnr = report_result(conf, val_model, test_imgs, test_masks, test_origs, test_dirs)
         val_psnrs.append(object_psnr)
@@ -124,6 +127,7 @@ def main():
     ckpt_dir = Path(conf["ckptdir"])
     ckpt_dir.mkdir(exist_ok=True)
     
+    writer = SummaryWriter('logs/meta-neus')
     # Train the meta_model using Reptile meta learning
     # https://arxiv.org/abs/1803.02999
     for epoch in range(conf["meta_epochs"]):
@@ -135,7 +139,7 @@ def main():
 
             inner_model = copy.deepcopy(meta_model)
             inner_optim = torch.optim.Adam(inner_model.parameters(), conf["inner_lr"])
-            inner_loop(conf, inner_model, inner_optim, imgs, masks, rays_o, rays_d)
+            inner_loop(conf, inner_model, inner_optim, imgs, masks, rays_o, rays_d, writer)
             
             with torch.no_grad():
                 for meta_param, inner_param in zip(meta_model.parameters(), inner_model.parameters()):
@@ -145,7 +149,7 @@ def main():
 
             iteration = step + epoch * len(train_loader)
             if (iteration % conf["report_iter"] == 0) or (iteration % len(train_loader) == 0):
-                val_psnr = val_meta(conf, meta_model, val_loader, device)
+                val_psnr = val_meta(conf, meta_model, val_loader, device, writer)
                 print(f"iteration: {iteration}, val_psnr: {val_psnr:0.3f}")
 
                 ckpt_path = ckpt_dir.joinpath(f"meta_iter{iteration}.pth")
